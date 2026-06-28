@@ -1,11 +1,14 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { auth } from "./lib/firebase.js";
+import { subscribeToLibrary, saveLibrary } from "./lib/cloudData.js";
 import { INITIAL_DATA } from "./data/initialData.js";
 import { GLOBAL_CSS } from "./styles/globalCss.js";
 import { inputStyle, btnStyle } from "./styles/sharedStyles.js";
-import { loadFromStorage, saveToStorage, encodeState, decodeState } from "./lib/storage.js";
 import { genreProgress, uniqueId } from "./lib/helpers.js";
 import { GenreSection } from "./components/GenreSection.jsx";
 import { DiscoverSection } from "./components/DiscoverSection.jsx";
+import { SignIn } from "./components/SignIn.jsx";
 
 // A series matches a search query if the query appears in the series
 // name, the author, or any book title within it.
@@ -17,20 +20,16 @@ function seriesMatchesQuery(series, query) {
   return series.books.some((b) => b.title.toLowerCase().includes(q));
 }
 
+// Top-level component: figures out whether anyone's signed in, and
+// renders either the sign-in screen or the actual tracker.
 export default function ReadingTracker() {
-  // Load saved progress from localStorage on first render, falling back
-  // to the starter data if nothing has been saved yet.
-  const [data, setData] = useState(() => loadFromStorage() ?? INITIAL_DATA);
-  const [editMode, setEditMode] = useState(false);
-  const [addingGenre, setAddingGenre] = useState(false);
-  const [newGenreName, setNewGenreName] = useState("");
-  const [modal, setModal] = useState(null); // null | "backup" | "restore"
-  const [loadText, setLoadText] = useState("");
-  const [loadError, setLoadError] = useState("");
-  const [copied, setCopied] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [user, setUser] = useState(undefined); // undefined = checking, null = signed out
 
-  // Inject CSS once
+  useEffect(() => {
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  // Inject CSS once, regardless of auth state
   useEffect(() => {
     const style = document.createElement("style");
     style.textContent = GLOBAL_CSS;
@@ -38,34 +37,56 @@ export default function ReadingTracker() {
     return () => document.head.removeChild(style);
   }, []);
 
-  // Every time `data` changes (a book gets checked off, a series gets
-  // added, etc.) this effect runs and writes the latest state to
-  // localStorage, so your progress survives a page refresh automatically.
+  if (user === undefined) {
+    return <div style={{ minHeight: "100vh", background: "#0b0b12" }} />;
+  }
+  if (user === null) {
+    return <SignIn />;
+  }
+  return <LibraryView uid={user.uid} />;
+}
+
+// The actual tracker UI, once we know who's signed in. Data lives in
+// Firestore under libraries/{uid} and stays in sync in real time across
+// every device signed into the same account.
+function LibraryView({ uid }) {
+  const [data, setData] = useState(null); // null while loading
+  const [editMode, setEditMode] = useState(false);
+  const [addingGenre, setAddingGenre] = useState(false);
+  const [newGenreName, setNewGenreName] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const seededRef = useRef(false);
+
+  // Subscribe to this user's library doc. Any write from this device or
+  // any other device shows up here automatically.
   useEffect(() => {
-    saveToStorage(data);
-  }, [data]);
+    seededRef.current = false;
+    const unsubscribe = subscribeToLibrary(uid, (remoteData) => {
+      if (remoteData) {
+        setData(remoteData);
+      } else if (!seededRef.current) {
+        // First time this account has used the app - seed it with the
+        // starter library so there's something to look at.
+        seededRef.current = true;
+        saveLibrary(uid, INITIAL_DATA);
+      }
+    });
+    return unsubscribe;
+  }, [uid]);
 
-  const handleCopy = useCallback(() => {
-    const encoded = encodeState(data);
-    navigator.clipboard.writeText(encoded)
-      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })
-      .catch(() => {/* clipboard blocked; user can select manually */});
-  }, [data]);
-
-  const handleLoad = useCallback(() => {
-    const decoded = decodeState(loadText);
-    if (!decoded || !decoded.genres) {
-      setLoadError("Invalid data - make sure you pasted the complete backup string.");
-      return;
-    }
-    setData(decoded);
-    setLoadText("");
-    setLoadError("");
-    setModal(null);
-  }, [loadText]);
+  // Applies a local change immediately (so the UI feels instant) and
+  // pushes the same change to Firestore so every other device picks it
+  // up. The next snapshot will reconcile if anything differs.
+  const updateData = useCallback((updater) => {
+    setData((prev) => {
+      const next = updater(prev);
+      saveLibrary(uid, next).catch(() => {/* will retry via Firestore's own offline queue */});
+      return next;
+    });
+  }, [uid]);
 
   const handleToggleBook = useCallback((genreId, seriesId, bookId) => {
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : {
@@ -79,11 +100,11 @@ export default function ReadingTracker() {
         }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleDeleteBook = useCallback((genreId, seriesId, bookId) => {
     if (!window.confirm("Delete this book?")) return;
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : {
@@ -94,28 +115,28 @@ export default function ReadingTracker() {
         }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleDeleteSeries = useCallback((genreId, seriesId) => {
     if (!window.confirm("Delete this entire series and all its books?")) return;
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : { ...g, series: g.series.filter((s) => s.id !== seriesId) }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleDeleteGenre = useCallback((genreId) => {
     if (!window.confirm("Delete this genre and EVERYTHING in it?")) return;
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.filter((g) => g.id !== genreId),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleAddBook = useCallback((genreId, seriesId, book) => {
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : {
@@ -129,19 +150,19 @@ export default function ReadingTracker() {
         }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleAddSeries = useCallback((genreId, series) => {
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : { ...g, series: [...g.series, series] }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   const handleEditBook = useCallback((genreId, seriesId, bookId, updates) => {
-    setData((prev) => ({
+    updateData((prev) => ({
       ...prev,
       genres: prev.genres.map((g) =>
         g.id !== genreId ? g : {
@@ -157,13 +178,13 @@ export default function ReadingTracker() {
         }
       ),
     }));
-  }, []);
+  }, [updateData]);
 
   // Moves a whole series (and its books) from one genre to another -
   // e.g. once you start reading a Discover suggestion and want it filed
   // under a real category instead of staying loose.
   const handleMoveSeries = useCallback((fromGenreId, seriesId, toGenreId) => {
-    setData((prev) => {
+    updateData((prev) => {
       const fromGenre = prev.genres.find((g) => g.id === fromGenreId);
       const series = fromGenre?.series.find((s) => s.id === seriesId);
       if (!series) return prev;
@@ -176,12 +197,12 @@ export default function ReadingTracker() {
         }),
       };
     });
-  }, []);
+  }, [updateData]);
 
   const handleAddGenre = () => {
     if (!newGenreName.trim()) return;
     const genre = { id: `g-${uniqueId()}`, name: newGenreName.trim(), series: [] };
-    setData((prev) => ({ ...prev, genres: [...prev.genres, genre] }));
+    updateData((prev) => ({ ...prev, genres: [...prev.genres, genre] }));
     setNewGenreName(""); setAddingGenre(false);
   };
 
@@ -189,11 +210,12 @@ export default function ReadingTracker() {
   // there's no query, everything passes through unchanged.
   const trimmedQuery = searchQuery.trim();
   const visibleGenres = useMemo(() => {
+    if (!data) return [];
     if (!trimmedQuery) return data.genres;
     return data.genres
       .map((g) => ({ ...g, series: g.series.filter((s) => seriesMatchesQuery(s, trimmedQuery)) }))
       .filter((g) => g.series.length > 0);
-  }, [data.genres, trimmedQuery]);
+  }, [data, trimmedQuery]);
 
   const matchedSeriesIds = useMemo(() => {
     if (!trimmedQuery) return null;
@@ -202,89 +224,16 @@ export default function ReadingTracker() {
     return ids;
   }, [visibleGenres, trimmedQuery]);
 
+  if (!data) {
+    return <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#54546a", padding: 24, fontFamily: "'JetBrains Mono', monospace" }}>Loading your library...</div>;
+  }
+
   // Grand totals (always reflect the full library, not the filtered view)
   let totalRead = 0, totalBooks = 0;
   data.genres.forEach((g) => { const p = genreProgress(g); totalRead += p.read; totalBooks += p.total; });
 
-  const encoded = encodeState(data);
-
   return (
     <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#d0d0e8", paddingBottom: 80 }}>
-
-      {/* BACKUP MODAL */}
-      {modal === "backup" && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 500,
-          background: "#000000cc", display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
-        }} onClick={() => setModal(null)}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: "#0e0e1e", border: "1px solid #2a2a44", borderRadius: 8,
-            padding: 20, maxWidth: 480, width: "100%",
-          }}>
-            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, color: "#baf9ff", marginBottom: 6 }}>Backup Your Progress</div>
-            <div style={{ fontSize: 12, color: "#54546a", fontFamily: "'JetBrains Mono', monospace", marginBottom: 12, lineHeight: 1.5 }}>
-              Your progress already saves automatically in this browser. Use this only if you want a manual backup - e.g. to move your data to a different browser or computer. Copy this string and save it somewhere safe.
-            </div>
-            <textarea readOnly value={encoded} onClick={e => e.target.select()} style={{
-              width: "100%", height: 100, background: "#060610", border: "1px solid #2a2a44",
-              color: "#8888aa", fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-              borderRadius: 4, padding: 8, resize: "none",
-            }} />
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button onClick={handleCopy} style={{
-                ...btnStyle("#39ff8a", "#0a1410"), flex: 1, padding: "8px",
-                fontSize: 12, letterSpacing: 0.5,
-              }}>
-                {copied ? "COPIED" : "COPY TO CLIPBOARD"}
-              </button>
-              <button onClick={() => setModal(null)} style={{ ...btnStyle("#444", "#111"), padding: "8px 16px" }}>
-                CLOSE
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* RESTORE MODAL */}
-      {modal === "restore" && (
-        <div style={{
-          position: "fixed", inset: 0, zIndex: 500,
-          background: "#000000cc", display: "flex", alignItems: "center", justifyContent: "center", padding: 16,
-        }} onClick={() => { setModal(null); setLoadText(""); setLoadError(""); }}>
-          <div onClick={e => e.stopPropagation()} style={{
-            background: "#0e0e1e", border: "1px solid #2a2a44", borderRadius: 8,
-            padding: 20, maxWidth: 480, width: "100%",
-          }}>
-            <div style={{ fontFamily: "'Playfair Display', serif", fontSize: 16, color: "#baf9ff", marginBottom: 6 }}>Restore From Backup</div>
-            <div style={{ fontSize: 12, color: "#54546a", fontFamily: "'JetBrains Mono', monospace", marginBottom: 12, lineHeight: 1.5 }}>
-              Paste a backup string below. This will replace your current saved progress in this browser.
-            </div>
-            <textarea
-              value={loadText}
-              onChange={e => { setLoadText(e.target.value); setLoadError(""); }}
-              placeholder="Paste backup string here..."
-              style={{
-                width: "100%", height: 100, background: "#060610", border: `1px solid ${loadError ? "#8a3a3a" : "#2a2a44"}`,
-                color: "#c0c0d8", fontFamily: "'JetBrains Mono', monospace", fontSize: 11,
-                borderRadius: 4, padding: 8, resize: "none",
-              }}
-            />
-            {loadError && <div style={{ fontSize: 11, color: "#8a3a3a", fontFamily: "'JetBrains Mono', monospace", marginTop: 6 }}>{loadError}</div>}
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button onClick={handleLoad} disabled={!loadText.trim()} style={{
-                ...btnStyle("#00f0ff", "#1a1208"), flex: 1, padding: "8px",
-                fontSize: 12, letterSpacing: 0.5,
-                opacity: loadText.trim() ? 1 : 0.4,
-              }}>
-                RESTORE PROGRESS
-              </button>
-              <button onClick={() => { setModal(null); setLoadText(""); setLoadError(""); }} style={{ ...btnStyle("#444", "#111"), padding: "8px 16px" }}>
-                CANCEL
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* HEADER */}
       <header style={{
@@ -309,19 +258,12 @@ export default function ReadingTracker() {
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-          <button onClick={() => setModal("backup")} style={{
+          <button onClick={() => signOut(auth)} style={{
             background: "transparent", border: "1px solid #2a2a44", color: "#54546a",
             borderRadius: 4, padding: "6px 10px", fontSize: 11,
             fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5,
-          }} title="Back up progress to clipboard">
-            SAVE
-          </button>
-          <button onClick={() => setModal("restore")} style={{
-            background: "transparent", border: "1px solid #2a2a44", color: "#54546a",
-            borderRadius: 4, padding: "6px 10px", fontSize: 11,
-            fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5,
-          }} title="Restore from a backup string">
-            LOAD
+          }} title="Sign out">
+            SIGN OUT
           </button>
           <button
             onClick={() => { setEditMode((e) => !e); setAddingGenre(false); }}
