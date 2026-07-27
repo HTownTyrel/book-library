@@ -5,9 +5,11 @@ import { subscribeToLibrary, saveLibrary } from "./lib/cloudData.js";
 import { INITIAL_DATA } from "./data/initialData.js";
 import { GLOBAL_CSS } from "./styles/globalCss.js";
 import { inputStyle } from "./styles/sharedStyles.js";
-import { seriesProgress, uniqueId, groupSeriesByAuthor } from "./lib/helpers.js";
+import { seriesProgress, uniqueId, groupSeriesByAuthor, uniqueAuthorNames } from "./lib/helpers.js";
 import { findNewReleases, CHECK_INTERVAL_MS } from "./lib/releaseCheck.js";
+import { fetchBookCover } from "./lib/bookCovers.js";
 import { AuthorSection } from "./components/AuthorSection.jsx";
+import { CurrentlyReadingBanner } from "./components/CurrentlyReadingBanner.jsx";
 import { AddSeriesForm } from "./components/AddSeriesForm.jsx";
 import { DiscoverSection } from "./components/DiscoverSection.jsx";
 import { SignIn } from "./components/SignIn.jsx";
@@ -68,6 +70,7 @@ function LibraryView({ uid }) {
   const [checkingReleases, setCheckingReleases] = useState(false);
   const seededRef = useRef(false);
   const releaseCheckRanRef = useRef(false);
+  const coversInFlightRef = useRef(new Set());
 
   // Subscribe to this user's library doc. Any write from this device or
   // any other device shows up here automatically.
@@ -84,6 +87,7 @@ function LibraryView({ uid }) {
           // it's ever useful again, but nothing groups by it anymore.
           const migrated = {
             releaseChecks: remoteData.releaseChecks || {},
+            covers: remoteData.covers || {},
             series: remoteData.genres.flatMap((g) =>
               g.series.map((s) => ({ ...s, genre: g.name }))
             ),
@@ -91,7 +95,7 @@ function LibraryView({ uid }) {
           setData(migrated);
           saveLibrary(uid, migrated).catch(() => {/* will retry via Firestore's own offline queue */});
         } else {
-          setData({ releaseChecks: {}, ...remoteData });
+          setData({ releaseChecks: {}, covers: {}, ...remoteData });
         }
       } else if (!seededRef.current) {
         // First time this account has used the app - seed it with the
@@ -118,7 +122,26 @@ function LibraryView({ uid }) {
     updateData((prev) => ({
       ...prev,
       series: prev.series.map((s) =>
-        s.id !== seriesId ? s : { ...s, books: s.books.map((b) => b.id !== bookId ? b : { ...b, read: !b.read }) }
+        s.id !== seriesId ? s : {
+          ...s,
+          books: s.books.map((b) => {
+            if (b.id !== bookId) return b;
+            const read = !b.read;
+            // Finishing a book means you're no longer "currently reading" it.
+            return { ...b, read, reading: read ? false : b.reading };
+          }),
+        }
+      ),
+    }));
+  }, [updateData]);
+
+  // Flags a book as "currently reading" (or un-flags it) - separate from
+  // `read`, so it doesn't affect your read/unread progress counts.
+  const handleToggleReading = useCallback((seriesId, bookId) => {
+    updateData((prev) => ({
+      ...prev,
+      series: prev.series.map((s) =>
+        s.id !== seriesId ? s : { ...s, books: s.books.map((b) => b.id !== bookId ? b : { ...b, reading: !b.reading }) }
       ),
     }));
   }, [updateData]);
@@ -158,7 +181,12 @@ function LibraryView({ uid }) {
         s.id !== seriesId ? s : {
           ...s,
           books: s.books
-            .map((b) => b.id !== bookId ? b : { ...b, ...updates })
+            .map((b) => {
+              if (b.id !== bookId) return b;
+              const merged = { ...b, ...updates };
+              if (merged.read) merged.reading = false;
+              return merged;
+            })
             .sort((a, b) => a.bookNum - b.bookNum),
         }
       ),
@@ -180,6 +208,20 @@ function LibraryView({ uid }) {
     setAddingSeries(false);
   };
 
+  // Saves your whole library as a JSON file the browser downloads - a
+  // manual backup you control yourself, separate from Firestore. Handy
+  // before a big edit, or just as peace of mind since deletes here have
+  // no undo.
+  const handleExportBackup = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `reading-tracker-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
   // Runs the "any new books out?" check for a list of author names.
   // Skips authors that were checked recently unless `force` is set (used
   // by the manual "Check releases" button). Results are saved back to
@@ -198,7 +240,7 @@ function LibraryView({ uid }) {
     const results = {};
     await Promise.all(dueAuthors.map(async (authorName) => {
       const knownTitles = data.series
-        .filter((s) => s.author === authorName)
+        .filter((s) => s.author.toLowerCase() === authorName.toLowerCase())
         .flatMap((s) => s.books.map((b) => b.title));
       const dismissed = data.releaseChecks?.[authorName]?.dismissed || [];
       try {
@@ -224,9 +266,41 @@ function LibraryView({ uid }) {
   useEffect(() => {
     if (!data || releaseCheckRanRef.current) return;
     releaseCheckRanRef.current = true;
-    const authorNames = Array.from(new Set(data.series.map((s) => s.author).filter(Boolean)));
-    runReleaseChecks(authorNames);
+    runReleaseChecks(uniqueAuthorNames(data.series));
   }, [data, runReleaseChecks]);
+
+  // Fetches a cover thumbnail (via its first book) for any series that
+  // doesn't have one cached yet - runs whenever the library changes, so
+  // newly added series pick up a cover without needing a special case,
+  // but each series is only ever looked up once (the result, including
+  // "no cover found", is cached in `data.covers` so we don't re-ask).
+  useEffect(() => {
+    if (!data) return;
+    const missing = data.series.filter((s) =>
+      s.books.length > 0 &&
+      data.covers?.[s.id] === undefined &&
+      !coversInFlightRef.current.has(s.id)
+    );
+    if (missing.length === 0) return;
+
+    missing.forEach((s) => coversInFlightRef.current.add(s.id));
+    (async () => {
+      const results = {};
+      await Promise.all(missing.map(async (s) => {
+        try {
+          results[s.id] = await fetchBookCover(s.books[0].title, s.author);
+        } catch {
+          // Skip - no entry written, so it's still "missing" and we'll
+          // try again next time the library changes.
+        } finally {
+          coversInFlightRef.current.delete(s.id);
+        }
+      }));
+      if (Object.keys(results).length > 0) {
+        updateData((prev) => ({ ...prev, covers: { ...prev.covers, ...results } }));
+      }
+    })();
+  }, [data, updateData]);
 
   // Adding a series from Discover is like handleAddSeries, but when it
   // introduces an author you don't have anything else by yet, we also
@@ -318,8 +392,9 @@ function LibraryView({ uid }) {
   const trimmedQuery = searchQuery.trim();
   const visibleSeries = useMemo(() => {
     if (!data) return [];
-    if (!trimmedQuery) return data.series;
-    return data.series.filter((s) => seriesMatchesQuery(s, trimmedQuery));
+    const withCovers = data.series.map((s) => ({ ...s, cover: data.covers?.[s.id] }));
+    if (!trimmedQuery) return withCovers;
+    return withCovers.filter((s) => seriesMatchesQuery(s, trimmedQuery));
   }, [data, trimmedQuery]);
 
   const authorLetterGroups = useMemo(() => groupSeriesByAuthor(visibleSeries), [visibleSeries]);
@@ -336,7 +411,7 @@ function LibraryView({ uid }) {
   // Grand totals (always reflect the full library, not the filtered view)
   let totalRead = 0, totalBooks = 0;
   data.series.forEach((s) => { const p = seriesProgress(s); totalRead += p.read; totalBooks += p.total; });
-  const totalAuthors = new Set(data.series.map((s) => s.author)).size;
+  const totalAuthors = uniqueAuthorNames(data.series).length;
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#d0d0e8", paddingBottom: 80 }}>
@@ -349,7 +424,7 @@ function LibraryView({ uid }) {
         borderBottom: "1px solid #14142a",
         padding: "14px 16px",
         display: "flex", alignItems: "center", justifyContent: "space-between",
-        gap: 8,
+        gap: 8, flexWrap: "wrap",
       }}>
         <div>
           <h1 style={{
@@ -363,10 +438,21 @@ function LibraryView({ uid }) {
             {totalRead} of {totalBooks} books read - {totalAuthors} authors, {data.series.length} series
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button
+            onClick={handleExportBackup}
+            style={{
+              background: "transparent", border: "1px solid #2a2a44", color: "#54546a",
+              borderRadius: 4, padding: "6px 10px", fontSize: 11,
+              fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5,
+            }}
+            title="Download your whole library as a JSON backup file"
+          >
+            BACKUP
+          </button>
           <button
             disabled={checkingReleases}
-            onClick={() => runReleaseChecks(Array.from(new Set(data.series.map((s) => s.author))), { force: true })}
+            onClick={() => runReleaseChecks(uniqueAuthorNames(data.series), { force: true })}
             style={{
               background: "transparent", border: "1px solid #2a2a44",
               color: checkingReleases ? "#ff2bd6" : "#54546a",
@@ -418,6 +504,13 @@ function LibraryView({ uid }) {
 
       {/* MAIN */}
       <main style={{ maxWidth: 740, margin: "0 auto", padding: "12px 12px" }}>
+        {!trimmedQuery && (
+          <CurrentlyReadingBanner
+            series={data.series}
+            onFinish={handleToggleBook}
+            onStop={handleToggleReading}
+          />
+        )}
         {authorLetterGroups.map((group) => (
           <div key={group.letter}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 2px 6px" }}>
@@ -433,6 +526,7 @@ function LibraryView({ uid }) {
                 author={author}
                 editMode={editMode}
                 onToggleBook={handleToggleBook}
+                onToggleReading={handleToggleReading}
                 onDeleteBook={handleDeleteBook}
                 onDeleteSeries={handleDeleteSeries}
                 onAddBook={handleAddBook}

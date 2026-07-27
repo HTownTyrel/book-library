@@ -9,7 +9,7 @@ import { seriesProgress } from "../lib/helpers.js";
 // When `forceOpen` is true (e.g. while a search is active and this series
 // has a match), the section stays expanded regardless of the user's own
 // click-to-toggle state.
-export function SeriesSection({ series, editMode, onToggleBook, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries, forceOpen }) {
+export function SeriesSection({ series, editMode, onToggleBook, onToggleReading, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries, forceOpen }) {
   const [manuallyOpen, setManuallyOpen] = useState(false);
   const [addingBook, setAddingBook] = useState(false);
   const [editingBookId, setEditingBookId] = useState(null);
@@ -39,6 +39,16 @@ export function SeriesSection({ series, editMode, onToggleBook, onDeleteBook, on
               transform: open ? "rotate(90deg)" : "none",
               transition: "transform 0.15s", flexShrink: 0,
             }}>{"▶"}</span>
+            {series.cover && (
+              <img
+                src={series.cover}
+                alt=""
+                style={{
+                  width: 26, height: 38, objectFit: "cover",
+                  borderRadius: 2, flexShrink: 0, border: "1px solid #1a1a2e",
+                }}
+              />
+            )}
             <div style={{ minWidth: 0 }}>
               <div style={{
                 fontSize: 14, fontWeight: 600,
@@ -85,7 +95,8 @@ export function SeriesSection({ series, editMode, onToggleBook, onDeleteBook, on
             ) : (
               <BookRow
                 key={book.id} book={book} seriesId={series.id}
-                onToggle={onToggleBook} editMode={editMode} onDelete={onDeleteBook}
+                onToggle={onToggleBook} onToggleReading={onToggleReading}
+                editMode={editMode} onDelete={onDeleteBook}
                 onEdit={setEditingBookId}
               />
             )

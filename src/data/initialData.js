@@ -10,6 +10,7 @@
 // keeping it around costs nothing and means the information isn't lost.
 export const INITIAL_DATA = {
   releaseChecks: {},
+  covers: {},
   series: [
     {
       id: "dcc",

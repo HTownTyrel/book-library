@@ -1,5 +1,6 @@
-export function BookRow({ book, seriesId, onToggle, editMode, onDelete, onEdit }) {
+export function BookRow({ book, seriesId, onToggle, onToggleReading, editMode, onDelete, onEdit }) {
   const isUnreleased = !book.released;
+  const canMarkReading = !isUnreleased && !book.read;
   return (
     <div className="rt-book-row" style={{
       display: "flex", alignItems: "center", gap: 10,
@@ -40,6 +41,21 @@ export function BookRow({ book, seriesId, onToggle, editMode, onDelete, onEdit }
           </span>
         )}
       </span>
+      {canMarkReading && (
+        <button
+          onClick={() => onToggleReading(seriesId, book.id)}
+          title={book.reading ? "Stop reading" : "Mark as currently reading"}
+          style={{
+            background: book.reading ? "#ffb34722" : "none",
+            border: `1px solid ${book.reading ? "#ffb347" : "#2a2a44"}`,
+            color: book.reading ? "#ffb347" : "#54546a",
+            borderRadius: 3, padding: "1px 6px", fontSize: 10,
+            fontFamily: "'JetBrains Mono', monospace", flexShrink: 0,
+          }}
+        >
+          {book.reading ? "READING" : "START"}
+        </button>
+      )}
       {editMode && (
         <>
           <button onClick={() => onEdit(book.id)} style={{

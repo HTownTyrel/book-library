@@ -19,6 +19,21 @@ export function uniqueId() {
   return Math.random().toString(36).slice(2, 9);
 }
 
+// Distinct authors in a series list, matched case-insensitively so
+// "Brad Thor" and "brad thor" (an easy typo across two separate "add
+// series" entries) count as the same person instead of splitting into
+// two groups. Whichever casing appears first in the list wins as the
+// display name.
+export function uniqueAuthorNames(seriesList) {
+  const seen = new Map(); // lowercased -> first-seen display casing
+  seriesList.forEach((s) => {
+    const raw = (s.author || "Unknown Author").trim() || "Unknown Author";
+    const key = raw.toLowerCase();
+    if (!seen.has(key)) seen.set(key, raw);
+  });
+  return Array.from(seen.values());
+}
+
 // Groups a flat series list by author, then buckets those authors into
 // alphabetical letter sections (A, B, C...) - like a contacts app. Authors
 // whose name doesn't start with a letter land under "#".
@@ -28,15 +43,15 @@ export function uniqueId() {
 // "Andrews & Wilson" or "David Bruns & JR Olson" where there's no single
 // last name to extract, so guessing would just produce wrong groupings.
 export function groupSeriesByAuthor(seriesList) {
-  const byAuthor = new Map();
+  const byAuthor = new Map(); // lowercased -> { name, series }
   seriesList.forEach((s) => {
-    const key = (s.author || "Unknown Author").trim() || "Unknown Author";
-    if (!byAuthor.has(key)) byAuthor.set(key, []);
-    byAuthor.get(key).push(s);
+    const raw = (s.author || "Unknown Author").trim() || "Unknown Author";
+    const key = raw.toLowerCase();
+    if (!byAuthor.has(key)) byAuthor.set(key, { name: raw, series: [] });
+    byAuthor.get(key).series.push(s);
   });
 
-  const authors = Array.from(byAuthor.entries())
-    .map(([name, series]) => ({ name, series }))
+  const authors = Array.from(byAuthor.values())
     .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 
   const byLetter = new Map();

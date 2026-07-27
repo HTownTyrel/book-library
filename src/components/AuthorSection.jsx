@@ -11,7 +11,7 @@ import { authorProgress } from "../lib/helpers.js";
 // even while collapsed so you know something's waiting inside.
 export function AuthorSection({
   author, editMode,
-  onToggleBook, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries,
+  onToggleBook, onToggleReading, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries,
   forceOpen, seriesForceOpenIds,
   candidates, onAddCandidate, onDismissCandidate, onAddCandidateAsNewSeries,
 }) {
@@ -82,6 +82,7 @@ export function AuthorSection({
               key={s.id} series={s}
               editMode={editMode}
               onToggleBook={onToggleBook}
+              onToggleReading={onToggleReading}
               onDeleteBook={onDeleteBook}
               onDeleteSeries={onDeleteSeries}
               onAddBook={onAddBook}
