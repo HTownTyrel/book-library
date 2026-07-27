@@ -13,7 +13,7 @@ export function AuthorSection({
   author, editMode,
   onToggleBook, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries,
   forceOpen, seriesForceOpenIds,
-  candidates, onAddCandidate, onDismissCandidate,
+  candidates, onAddCandidate, onDismissCandidate, onAddCandidateAsNewSeries,
 }) {
   const [manuallyOpen, setManuallyOpen] = useState(false);
   const open = forceOpen || manuallyOpen;
@@ -74,6 +74,7 @@ export function AuthorSection({
               candidates={candidates}
               onAdd={onAddCandidate}
               onDismiss={onDismissCandidate}
+              onAddAsNewSeries={onAddCandidateAsNewSeries}
             />
           )}
           {author.series.map(s => (

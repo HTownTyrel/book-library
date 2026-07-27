@@ -228,6 +228,18 @@ function LibraryView({ uid }) {
     runReleaseChecks(authorNames);
   }, [data, runReleaseChecks]);
 
+  // Adding a series from Discover is like handleAddSeries, but when it
+  // introduces an author you don't have anything else by yet, we also
+  // immediately (not waiting for the daily throttle) look up the rest of
+  // their catalog, so Discover can offer their other books right away.
+  const handleAddSeriesFromDiscover = useCallback((series) => {
+    const isNewAuthor = !data.series.some((s) => s.author.toLowerCase() === series.author.toLowerCase());
+    handleAddSeries(series);
+    if (isNewAuthor) {
+      runReleaseChecks([series.author], { force: true });
+    }
+  }, [data, handleAddSeries, runReleaseChecks]);
+
   const handleAddReleaseCandidate = useCallback((authorName, candidate, seriesId) => {
     updateData((prev) => {
       const series = prev.series.find((s) => s.id === seriesId);
@@ -248,6 +260,33 @@ function LibraryView({ uid }) {
         series: prev.series.map((s) =>
           s.id !== seriesId ? s : { ...s, books: [...s.books, book].sort((a, b) => a.bookNum - b.bookNum) }
         ),
+        releaseChecks: {
+          ...prev.releaseChecks,
+          [authorName]: { ...existing, candidates: existing.candidates.filter((c) => c.title !== candidate.title) },
+        },
+      };
+    });
+  }, [updateData]);
+
+  // Files a candidate as book 1 of a brand-new series, for when it
+  // clearly isn't part of any series you already have by this author.
+  const handleAddCandidateAsNewSeries = useCallback((authorName, candidate, seriesName) => {
+    updateData((prev) => {
+      const released = inferReleased(candidate.publishedDate);
+      const seriesId = `s-${uniqueId()}`;
+      const book = {
+        id: `${seriesId}-${uniqueId()}`,
+        bookNum: 1,
+        title: candidate.title,
+        read: false,
+        released,
+        releaseDate: released ? undefined : candidate.publishedDate,
+      };
+      const newSeries = { id: seriesId, name: seriesName, author: authorName, books: [book] };
+      const existing = prev.releaseChecks[authorName];
+      return {
+        ...prev,
+        series: [...prev.series, newSeries],
         releaseChecks: {
           ...prev.releaseChecks,
           [authorName]: { ...existing, candidates: existing.candidates.filter((c) => c.title !== candidate.title) },
@@ -404,6 +443,7 @@ function LibraryView({ uid }) {
                 candidates={data.releaseChecks?.[author.name]?.candidates}
                 onAddCandidate={handleAddReleaseCandidate}
                 onDismissCandidate={handleDismissCandidate}
+                onAddCandidateAsNewSeries={handleAddCandidateAsNewSeries}
               />
             ))}
           </div>
@@ -432,7 +472,17 @@ function LibraryView({ uid }) {
         )}
 
         {/* DISCOVER */}
-        {!trimmedQuery && <DiscoverSection />}
+        {!trimmedQuery && (
+          <DiscoverSection
+            existingSeries={data.series}
+            onAddSeries={handleAddSeriesFromDiscover}
+            releaseChecks={data.releaseChecks}
+            onAddCandidate={handleAddReleaseCandidate}
+            onDismissCandidate={handleDismissCandidate}
+            onAddCandidateAsNewSeries={handleAddCandidateAsNewSeries}
+            checkingReleases={checkingReleases}
+          />
+        )}
       </main>
     </div>
   );
