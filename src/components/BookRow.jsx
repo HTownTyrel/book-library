@@ -1,4 +1,4 @@
-export function BookRow({ book, seriesId, genreId, onToggle, editMode, onDelete, onEdit }) {
+export function BookRow({ book, seriesId, onToggle, editMode, onDelete, onEdit }) {
   const isUnreleased = !book.released;
   return (
     <div className="rt-book-row" style={{
@@ -12,7 +12,7 @@ export function BookRow({ book, seriesId, genreId, onToggle, editMode, onDelete,
         type="checkbox"
         checked={!!book.read}
         disabled={isUnreleased}
-        onChange={() => onToggle(genreId, seriesId, book.id)}
+        onChange={() => onToggle(seriesId, book.id)}
         style={{ width: 15, height: 15 }}
       />
       <span style={{
@@ -50,7 +50,7 @@ export function BookRow({ book, seriesId, genreId, onToggle, editMode, onDelete,
             onMouseOver={e => e.target.style.opacity = 1}
             onMouseOut={e => e.target.style.opacity = 0.7}
           >EDIT</button>
-          <button onClick={() => onDelete(genreId, seriesId, book.id)} style={{
+          <button onClick={() => onDelete(seriesId, book.id)} style={{
             background: "none", border: "none",
             color: "#5a2a2a", fontSize: 14, padding: "0 4px",
             opacity: 0.6, transition: "opacity 0.1s",

@@ -1,15 +1,18 @@
 import { useState } from "react";
-import { uniqueId } from "../lib/helpers.js";
 import { inputStyle, btnStyle } from "../styles/sharedStyles.js";
 
-export function AddSeriesForm({ onAdd, onCancel }) {
-  const [name, setName] = useState("");
-  const [author, setAuthor] = useState("");
+// Lets you fix a series' name or author - handy now that grouping is
+// based on the author text: correcting a typo here (e.g. "Jack Carr" vs
+// "Jack Carr ") automatically moves the series into the right group.
+export function EditSeriesForm({ series, onSave, onCancel }) {
+  const [name, setName] = useState(series.name);
+  const [author, setAuthor] = useState(series.author);
+
   const submit = () => {
     if (!name.trim() || !author.trim()) return;
-    onAdd({ id: `s-${uniqueId()}`, name: name.trim(), author: author.trim(), books: [] });
-    setName(""); setAuthor("");
+    onSave(series.id, { name: name.trim(), author: author.trim() });
   };
+
   return (
     <div className="rt-fade" style={{
       padding: "10px 14px", background: "#0d0d1e",
@@ -20,8 +23,9 @@ export function AddSeriesForm({ onAdd, onCancel }) {
         style={{ ...inputStyle, flex: 1, minWidth: 140 }}
         onKeyDown={e => e.key === "Enter" && submit()} />
       <input value={author} onChange={e => setAuthor(e.target.value)} placeholder="Author"
-        style={{ ...inputStyle, flex: 1, minWidth: 120 }} />
-      <button onClick={submit} style={btnStyle("#00f0ff", "#1a1208")}>Add Series</button>
+        style={{ ...inputStyle, flex: 1, minWidth: 120 }}
+        onKeyDown={e => e.key === "Enter" && submit()} />
+      <button onClick={submit} style={btnStyle("#00f0ff", "#1a1208")}>Save</button>
       <button onClick={onCancel} style={btnStyle("#444", "#111")}>Cancel</button>
     </div>
   );

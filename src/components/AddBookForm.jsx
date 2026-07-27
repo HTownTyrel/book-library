@@ -2,7 +2,7 @@ import { useState } from "react";
 import { uniqueId } from "../lib/helpers.js";
 import { inputStyle, btnStyle } from "../styles/sharedStyles.js";
 
-export function AddBookForm({ seriesId, genreId, onAdd, onCancel }) {
+export function AddBookForm({ seriesId, onAdd, onCancel }) {
   const [title, setTitle] = useState("");
   const [bookNum, setBookNum] = useState("");
   const [releaseDate, setReleaseDate] = useState("");
@@ -10,7 +10,7 @@ export function AddBookForm({ seriesId, genreId, onAdd, onCancel }) {
 
   const submit = () => {
     if (!title.trim()) return;
-    onAdd(genreId, seriesId, {
+    onAdd(seriesId, {
       id: `${seriesId}-${uniqueId()}`,
       bookNum: parseFloat(bookNum) || 0,
       title: title.trim(),

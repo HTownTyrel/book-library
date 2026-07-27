@@ -1,15 +1,24 @@
 import { useState } from "react";
 import { ProgressPill } from "./ProgressPill.jsx";
 import { SeriesSection } from "./SeriesSection.jsx";
-import { AddSeriesForm } from "./AddSeriesForm.jsx";
-import { genreProgress } from "../lib/helpers.js";
+import { NewReleaseAlerts } from "./NewReleaseAlerts.jsx";
+import { authorProgress } from "../lib/helpers.js";
 
-export function GenreSection({ genre, editMode, onToggleBook, onDeleteBook, onDeleteSeries, onDeleteGenre, onAddBook, onAddSeries, onEditBook, onMoveSeries, allGenres, forceOpen, seriesForceOpenIds }) {
+// One collapsible block per author, containing every series of theirs -
+// this replaced the old per-genre grouping. `candidates` are any
+// possible-new-release results found for this author (see
+// lib/releaseCheck.js); when present, a small dot shows in the header
+// even while collapsed so you know something's waiting inside.
+export function AuthorSection({
+  author, editMode,
+  onToggleBook, onDeleteBook, onDeleteSeries, onAddBook, onEditBook, onEditSeries,
+  forceOpen, seriesForceOpenIds,
+  candidates, onAddCandidate, onDismissCandidate,
+}) {
   const [manuallyOpen, setManuallyOpen] = useState(false);
-  const [addingSeries, setAddingSeries] = useState(false);
   const open = forceOpen || manuallyOpen;
-  const { read, total } = genreProgress(genre);
-  const otherGenres = allGenres?.filter((g) => g.id !== genre.id);
+  const { read, total } = authorProgress(author);
+  const candidateCount = candidates?.length || 0;
 
   return (
     <div style={{ marginBottom: 4 }}>
@@ -36,26 +45,21 @@ export function GenreSection({ genre, editMode, onToggleBook, onDeleteBook, onDe
               margin: 0, fontSize: 17, fontWeight: 700,
               fontFamily: "'Playfair Display', Georgia, serif",
               color: "#baf9ff", letterSpacing: 0.5,
-            }}>{genre.name}</h2>
+            }}>{author.name}</h2>
             <div style={{
               fontSize: 11, color: "#54546a",
               fontFamily: "'JetBrains Mono', monospace", marginTop: 2,
             }}>
-              {genre.series.length} series
+              {author.series.length} series
+              {candidateCount > 0 && (
+                <span style={{ color: "#ff2bd6", marginLeft: 8 }}>
+                  {"● "}{candidateCount} possible new release{candidateCount > 1 ? "s" : ""}
+                </span>
+              )}
             </div>
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-          <ProgressPill read={read} total={total} />
-          {editMode && (
-            <button onClick={e => { e.stopPropagation(); onDeleteGenre(genre.id); }}
-              style={{
-                background: "none", border: "1px solid #5a2a2a", color: "#884444",
-                borderRadius: 3, padding: "2px 8px", fontSize: 11,
-                fontFamily: "'JetBrains Mono', monospace",
-              }}>DEL</button>
-          )}
-        </div>
+        <ProgressPill read={read} total={total} />
       </div>
 
       {/* Series list */}
@@ -63,36 +67,28 @@ export function GenreSection({ genre, editMode, onToggleBook, onDeleteBook, onDe
         <div className="rt-fade" style={{
           marginLeft: 12, borderLeft: "1px solid #1a1a2e", marginBottom: 6,
         }}>
-          {genre.series.map(s => (
+          {candidateCount > 0 && (
+            <NewReleaseAlerts
+              authorName={author.name}
+              series={author.series}
+              candidates={candidates}
+              onAdd={onAddCandidate}
+              onDismiss={onDismissCandidate}
+            />
+          )}
+          {author.series.map(s => (
             <SeriesSection
-              key={s.id} series={s} genreId={genre.id}
+              key={s.id} series={s}
               editMode={editMode}
               onToggleBook={onToggleBook}
               onDeleteBook={onDeleteBook}
               onDeleteSeries={onDeleteSeries}
               onAddBook={onAddBook}
               onEditBook={onEditBook}
-              onMoveSeries={onMoveSeries}
-              otherGenres={otherGenres}
+              onEditSeries={onEditSeries}
               forceOpen={seriesForceOpenIds?.has(s.id)}
             />
           ))}
-          {editMode && !addingSeries && (
-            <div style={{ padding: "8px 14px", background: "#0c0c18" }}>
-              <button onClick={() => setAddingSeries(true)} style={{
-                background: "none", border: "1px dashed #2a2a44", color: "#44445a",
-                borderRadius: 4, padding: "6px 14px", fontSize: 12,
-                fontFamily: "'JetBrains Mono', monospace", width: "100%",
-              }}>+ add series</button>
-            </div>
-          )}
-          {editMode && addingSeries && (
-            <AddSeriesForm
-              genreId={genre.id}
-              onAdd={(gId, s) => { onAddSeries(gId, s); setAddingSeries(false); }}
-              onCancel={() => setAddingSeries(false)}
-            />
-          )}
         </div>
       )}
     </div>

@@ -4,9 +4,11 @@ import { auth } from "./lib/firebase.js";
 import { subscribeToLibrary, saveLibrary } from "./lib/cloudData.js";
 import { INITIAL_DATA } from "./data/initialData.js";
 import { GLOBAL_CSS } from "./styles/globalCss.js";
-import { inputStyle, btnStyle } from "./styles/sharedStyles.js";
-import { genreProgress, uniqueId } from "./lib/helpers.js";
-import { GenreSection } from "./components/GenreSection.jsx";
+import { inputStyle } from "./styles/sharedStyles.js";
+import { seriesProgress, uniqueId, groupSeriesByAuthor } from "./lib/helpers.js";
+import { findNewReleases, CHECK_INTERVAL_MS } from "./lib/releaseCheck.js";
+import { AuthorSection } from "./components/AuthorSection.jsx";
+import { AddSeriesForm } from "./components/AddSeriesForm.jsx";
 import { DiscoverSection } from "./components/DiscoverSection.jsx";
 import { SignIn } from "./components/SignIn.jsx";
 
@@ -18,6 +20,15 @@ function seriesMatchesQuery(series, query) {
   if (series.name.toLowerCase().includes(q)) return true;
   if (series.author.toLowerCase().includes(q)) return true;
   return series.books.some((b) => b.title.toLowerCase().includes(q));
+}
+
+// A Google Books "publishedDate" can be a full date, just a year, or
+// missing. If we can't tell it's in the future, we assume it's already out.
+function inferReleased(publishedDate) {
+  if (!publishedDate) return true;
+  const time = new Date(publishedDate).getTime();
+  if (Number.isNaN(time)) return true;
+  return time <= Date.now();
 }
 
 // Top-level component: figures out whether anyone's signed in, and
@@ -52,18 +63,36 @@ export default function ReadingTracker() {
 function LibraryView({ uid }) {
   const [data, setData] = useState(null); // null while loading
   const [editMode, setEditMode] = useState(false);
-  const [addingGenre, setAddingGenre] = useState(false);
-  const [newGenreName, setNewGenreName] = useState("");
+  const [addingSeries, setAddingSeries] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [checkingReleases, setCheckingReleases] = useState(false);
   const seededRef = useRef(false);
+  const releaseCheckRanRef = useRef(false);
 
   // Subscribe to this user's library doc. Any write from this device or
   // any other device shows up here automatically.
   useEffect(() => {
     seededRef.current = false;
+    releaseCheckRanRef.current = false;
     const unsubscribe = subscribeToLibrary(uid, (remoteData) => {
       if (remoteData) {
-        setData(remoteData);
+        if (remoteData.genres && !remoteData.series) {
+          // One-time migration: this account still has the old
+          // genre -> series -> books shape. Flatten it into a single
+          // series list grouped by author instead - each series keeps
+          // its old genre name as harmless leftover metadata, in case
+          // it's ever useful again, but nothing groups by it anymore.
+          const migrated = {
+            releaseChecks: remoteData.releaseChecks || {},
+            series: remoteData.genres.flatMap((g) =>
+              g.series.map((s) => ({ ...s, genre: g.name }))
+            ),
+          };
+          setData(migrated);
+          saveLibrary(uid, migrated).catch(() => {/* will retry via Firestore's own offline queue */});
+        } else {
+          setData({ releaseChecks: {}, ...remoteData });
+        }
       } else if (!seededRef.current) {
         // First time this account has used the app - seed it with the
         // starter library so there's something to look at.
@@ -85,144 +114,181 @@ function LibraryView({ uid }) {
     });
   }, [uid]);
 
-  const handleToggleBook = useCallback((genreId, seriesId, bookId) => {
+  const handleToggleBook = useCallback((seriesId, bookId) => {
     updateData((prev) => ({
       ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : {
-          ...g,
-          series: g.series.map((s) =>
-            s.id !== seriesId ? s : {
-              ...s,
-              books: s.books.map((b) => b.id !== bookId ? b : { ...b, read: !b.read }),
-            }
-          ),
-        }
+      series: prev.series.map((s) =>
+        s.id !== seriesId ? s : { ...s, books: s.books.map((b) => b.id !== bookId ? b : { ...b, read: !b.read }) }
       ),
     }));
   }, [updateData]);
 
-  const handleDeleteBook = useCallback((genreId, seriesId, bookId) => {
+  const handleDeleteBook = useCallback((seriesId, bookId) => {
     if (!window.confirm("Delete this book?")) return;
     updateData((prev) => ({
       ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : {
-          ...g,
-          series: g.series.map((s) =>
-            s.id !== seriesId ? s : { ...s, books: s.books.filter((b) => b.id !== bookId) }
-          ),
-        }
+      series: prev.series.map((s) =>
+        s.id !== seriesId ? s : { ...s, books: s.books.filter((b) => b.id !== bookId) }
       ),
     }));
   }, [updateData]);
 
-  const handleDeleteSeries = useCallback((genreId, seriesId) => {
+  const handleDeleteSeries = useCallback((seriesId) => {
     if (!window.confirm("Delete this entire series and all its books?")) return;
+    updateData((prev) => ({ ...prev, series: prev.series.filter((s) => s.id !== seriesId) }));
+  }, [updateData]);
+
+  const handleAddBook = useCallback((seriesId, book) => {
     updateData((prev) => ({
       ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : { ...g, series: g.series.filter((s) => s.id !== seriesId) }
+      series: prev.series.map((s) =>
+        s.id !== seriesId ? s : { ...s, books: [...s.books, book].sort((a, b) => a.bookNum - b.bookNum) }
       ),
     }));
   }, [updateData]);
 
-  const handleDeleteGenre = useCallback((genreId) => {
-    if (!window.confirm("Delete this genre and EVERYTHING in it?")) return;
-    updateData((prev) => ({
-      ...prev,
-      genres: prev.genres.filter((g) => g.id !== genreId),
-    }));
+  const handleAddSeries = useCallback((series) => {
+    updateData((prev) => ({ ...prev, series: [...prev.series, series] }));
   }, [updateData]);
 
-  const handleAddBook = useCallback((genreId, seriesId, book) => {
+  const handleEditBook = useCallback((seriesId, bookId, updates) => {
     updateData((prev) => ({
       ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : {
-          ...g,
-          series: g.series.map((s) =>
-            s.id !== seriesId ? s : {
-              ...s,
-              books: [...s.books, book].sort((a, b) => a.bookNum - b.bookNum),
-            }
-          ),
+      series: prev.series.map((s) =>
+        s.id !== seriesId ? s : {
+          ...s,
+          books: s.books
+            .map((b) => b.id !== bookId ? b : { ...b, ...updates })
+            .sort((a, b) => a.bookNum - b.bookNum),
         }
       ),
     }));
   }, [updateData]);
 
-  const handleAddSeries = useCallback((genreId, series) => {
+  // Renaming a series or correcting its author text is how you "move" a
+  // series now - since grouping is automatic based on the author field,
+  // fixing a typo here reshuffles it into the right group on its own.
+  const handleEditSeries = useCallback((seriesId, updates) => {
     updateData((prev) => ({
       ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : { ...g, series: [...g.series, series] }
-      ),
+      series: prev.series.map((s) => s.id !== seriesId ? s : { ...s, ...updates }),
     }));
   }, [updateData]);
 
-  const handleEditBook = useCallback((genreId, seriesId, bookId, updates) => {
-    updateData((prev) => ({
-      ...prev,
-      genres: prev.genres.map((g) =>
-        g.id !== genreId ? g : {
-          ...g,
-          series: g.series.map((s) =>
-            s.id !== seriesId ? s : {
-              ...s,
-              books: s.books
-                .map((b) => b.id !== bookId ? b : { ...b, ...updates })
-                .sort((a, b) => a.bookNum - b.bookNum),
-            }
-          ),
-        }
-      ),
-    }));
-  }, [updateData]);
+  const handleAddSeriesSubmit = (series) => {
+    handleAddSeries(series);
+    setAddingSeries(false);
+  };
 
-  // Moves a whole series (and its books) from one genre to another -
-  // e.g. once you start reading a Discover suggestion and want it filed
-  // under a real category instead of staying loose.
-  const handleMoveSeries = useCallback((fromGenreId, seriesId, toGenreId) => {
+  // Runs the "any new books out?" check for a list of author names.
+  // Skips authors that were checked recently unless `force` is set (used
+  // by the manual "Check releases" button). Results are saved back to
+  // Firestore so every device shares the same findings and throttling.
+  const runReleaseChecks = useCallback(async (authorNames, { force = false } = {}) => {
+    if (!data) return;
+    const now = Date.now();
+    const dueAuthors = authorNames.filter((name) => {
+      if (force) return true;
+      const existing = data.releaseChecks?.[name];
+      return !existing || now - new Date(existing.lastChecked).getTime() > CHECK_INTERVAL_MS;
+    });
+    if (dueAuthors.length === 0) return;
+
+    setCheckingReleases(true);
+    const results = {};
+    await Promise.all(dueAuthors.map(async (authorName) => {
+      const knownTitles = data.series
+        .filter((s) => s.author === authorName)
+        .flatMap((s) => s.books.map((b) => b.title));
+      const dismissed = data.releaseChecks?.[authorName]?.dismissed || [];
+      try {
+        const found = await findNewReleases(authorName, knownTitles, dismissed);
+        results[authorName] = {
+          lastChecked: new Date().toISOString(),
+          dismissed,
+          candidates: found,
+        };
+      } catch {
+        // Google Books hiccup or rate limit - just skip, we'll retry next time.
+      }
+    }));
+    setCheckingReleases(false);
+
+    if (Object.keys(results).length > 0) {
+      updateData((prev) => ({ ...prev, releaseChecks: { ...prev.releaseChecks, ...results } }));
+    }
+  }, [data, updateData]);
+
+  // Kick off an automatic (throttled) check once per session, right
+  // after the library first loads.
+  useEffect(() => {
+    if (!data || releaseCheckRanRef.current) return;
+    releaseCheckRanRef.current = true;
+    const authorNames = Array.from(new Set(data.series.map((s) => s.author).filter(Boolean)));
+    runReleaseChecks(authorNames);
+  }, [data, runReleaseChecks]);
+
+  const handleAddReleaseCandidate = useCallback((authorName, candidate, seriesId) => {
     updateData((prev) => {
-      const fromGenre = prev.genres.find((g) => g.id === fromGenreId);
-      const series = fromGenre?.series.find((s) => s.id === seriesId);
+      const series = prev.series.find((s) => s.id === seriesId);
       if (!series) return prev;
+      const nextNum = series.books.length > 0 ? Math.max(...series.books.map((b) => b.bookNum)) + 1 : 1;
+      const released = inferReleased(candidate.publishedDate);
+      const book = {
+        id: `${seriesId}-${uniqueId()}`,
+        bookNum: nextNum,
+        title: candidate.title,
+        read: false,
+        released,
+        releaseDate: released ? undefined : candidate.publishedDate,
+      };
+      const existing = prev.releaseChecks[authorName];
       return {
         ...prev,
-        genres: prev.genres.map((g) => {
-          if (g.id === fromGenreId) return { ...g, series: g.series.filter((s) => s.id !== seriesId) };
-          if (g.id === toGenreId) return { ...g, series: [...g.series, series] };
-          return g;
-        }),
+        series: prev.series.map((s) =>
+          s.id !== seriesId ? s : { ...s, books: [...s.books, book].sort((a, b) => a.bookNum - b.bookNum) }
+        ),
+        releaseChecks: {
+          ...prev.releaseChecks,
+          [authorName]: { ...existing, candidates: existing.candidates.filter((c) => c.title !== candidate.title) },
+        },
       };
     });
   }, [updateData]);
 
-  const handleAddGenre = () => {
-    if (!newGenreName.trim()) return;
-    const genre = { id: `g-${uniqueId()}`, name: newGenreName.trim(), series: [] };
-    updateData((prev) => ({ ...prev, genres: [...prev.genres, genre] }));
-    setNewGenreName(""); setAddingGenre(false);
-  };
+  const handleDismissCandidate = useCallback((authorName, title) => {
+    updateData((prev) => {
+      const existing = prev.releaseChecks?.[authorName];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        releaseChecks: {
+          ...prev.releaseChecks,
+          [authorName]: {
+            ...existing,
+            candidates: existing.candidates.filter((c) => c.title !== title),
+            dismissed: [...(existing.dismissed || []), title],
+          },
+        },
+      };
+    });
+  }, [updateData]);
 
-  // Filter genres/series down to whatever matches the search box. When
-  // there's no query, everything passes through unchanged.
+  // Filter series down to whatever matches the search box, then group
+  // the result by author. With no query, everything passes through.
   const trimmedQuery = searchQuery.trim();
-  const visibleGenres = useMemo(() => {
+  const visibleSeries = useMemo(() => {
     if (!data) return [];
-    if (!trimmedQuery) return data.genres;
-    return data.genres
-      .map((g) => ({ ...g, series: g.series.filter((s) => seriesMatchesQuery(s, trimmedQuery)) }))
-      .filter((g) => g.series.length > 0);
+    if (!trimmedQuery) return data.series;
+    return data.series.filter((s) => seriesMatchesQuery(s, trimmedQuery));
   }, [data, trimmedQuery]);
+
+  const authorLetterGroups = useMemo(() => groupSeriesByAuthor(visibleSeries), [visibleSeries]);
 
   const matchedSeriesIds = useMemo(() => {
     if (!trimmedQuery) return null;
-    const ids = new Set();
-    visibleGenres.forEach((g) => g.series.forEach((s) => ids.add(s.id)));
-    return ids;
-  }, [visibleGenres, trimmedQuery]);
+    return new Set(visibleSeries.map((s) => s.id));
+  }, [visibleSeries, trimmedQuery]);
 
   if (!data) {
     return <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#54546a", padding: 24, fontFamily: "'JetBrains Mono', monospace" }}>Loading your library...</div>;
@@ -230,7 +296,8 @@ function LibraryView({ uid }) {
 
   // Grand totals (always reflect the full library, not the filtered view)
   let totalRead = 0, totalBooks = 0;
-  data.genres.forEach((g) => { const p = genreProgress(g); totalRead += p.read; totalBooks += p.total; });
+  data.series.forEach((s) => { const p = seriesProgress(s); totalRead += p.read; totalBooks += p.total; });
+  const totalAuthors = new Set(data.series.map((s) => s.author)).size;
 
   return (
     <div style={{ minHeight: "100vh", background: "#0b0b12", color: "#d0d0e8", paddingBottom: 80 }}>
@@ -254,10 +321,23 @@ function LibraryView({ uid }) {
             Reading Tracker
           </h1>
           <div style={{ fontSize: 11, color: "#44445a", fontFamily: "'JetBrains Mono', monospace", marginTop: 2 }}>
-            {totalRead} of {totalBooks} books read - {data.genres.length} genres
+            {totalRead} of {totalBooks} books read - {totalAuthors} authors, {data.series.length} series
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <button
+            disabled={checkingReleases}
+            onClick={() => runReleaseChecks(Array.from(new Set(data.series.map((s) => s.author))), { force: true })}
+            style={{
+              background: "transparent", border: "1px solid #2a2a44",
+              color: checkingReleases ? "#ff2bd6" : "#54546a",
+              borderRadius: 4, padding: "6px 10px", fontSize: 11,
+              fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5,
+            }}
+            title="Check Google Books for new releases from every author in your library"
+          >
+            {checkingReleases ? "CHECKING..." : "CHECK RELEASES"}
+          </button>
           <button onClick={() => signOut(auth)} style={{
             background: "transparent", border: "1px solid #2a2a44", color: "#54546a",
             borderRadius: 4, padding: "6px 10px", fontSize: 11,
@@ -266,7 +346,7 @@ function LibraryView({ uid }) {
             SIGN OUT
           </button>
           <button
-            onClick={() => { setEditMode((e) => !e); setAddingGenre(false); }}
+            onClick={() => { setEditMode((e) => !e); setAddingSeries(false); }}
             style={{
               background: editMode ? "#00f0ff18" : "transparent",
               border: `1px solid ${editMode ? "#00f0ff" : "#2a2a44"}`,
@@ -292,65 +372,61 @@ function LibraryView({ uid }) {
         />
         {trimmedQuery && (
           <div style={{ fontSize: 11, color: "#44445a", fontFamily: "'JetBrains Mono', monospace", margin: "6px 2px 0" }}>
-            {visibleGenres.reduce((a, g) => a + g.series.length, 0)} series matched
+            {visibleSeries.length} series matched
           </div>
         )}
       </div>
 
       {/* MAIN */}
       <main style={{ maxWidth: 740, margin: "0 auto", padding: "12px 12px" }}>
-        {visibleGenres.map((genre) => (
-          <GenreSection
-            key={genre.id}
-            genre={genre}
-            editMode={editMode}
-            onToggleBook={handleToggleBook}
-            onDeleteBook={handleDeleteBook}
-            onDeleteSeries={handleDeleteSeries}
-            onDeleteGenre={handleDeleteGenre}
-            onAddBook={handleAddBook}
-            onAddSeries={handleAddSeries}
-            onEditBook={handleEditBook}
-            onMoveSeries={handleMoveSeries}
-            allGenres={data.genres}
-            forceOpen={!!trimmedQuery}
-            seriesForceOpenIds={matchedSeriesIds}
-          />
+        {authorLetterGroups.map((group) => (
+          <div key={group.letter}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "18px 2px 6px" }}>
+              <span style={{
+                fontSize: 13, fontFamily: "'JetBrains Mono', monospace",
+                color: "#3a3a5a", letterSpacing: 2,
+              }}>{group.letter}</span>
+              <div style={{ flex: 1, height: 1, background: "#1a1a2e" }} />
+            </div>
+            {group.authors.map((author) => (
+              <AuthorSection
+                key={author.name}
+                author={author}
+                editMode={editMode}
+                onToggleBook={handleToggleBook}
+                onDeleteBook={handleDeleteBook}
+                onDeleteSeries={handleDeleteSeries}
+                onAddBook={handleAddBook}
+                onEditBook={handleEditBook}
+                onEditSeries={handleEditSeries}
+                forceOpen={!!trimmedQuery}
+                seriesForceOpenIds={matchedSeriesIds}
+                candidates={data.releaseChecks?.[author.name]?.candidates}
+                onAddCandidate={handleAddReleaseCandidate}
+                onDismissCandidate={handleDismissCandidate}
+              />
+            ))}
+          </div>
         ))}
 
-        {trimmedQuery && visibleGenres.length === 0 && (
+        {trimmedQuery && authorLetterGroups.length === 0 && (
           <div style={{ padding: "24px 14px", textAlign: "center", color: "#44445a", fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>
             No series match "{trimmedQuery}"
           </div>
         )}
 
-        {/* Add genre */}
+        {/* Add series */}
         {editMode && !trimmedQuery && (
           <div style={{ marginTop: 8 }}>
-            {!addingGenre ? (
-              <button onClick={() => setAddingGenre(true)} style={{
+            {!addingSeries ? (
+              <button onClick={() => setAddingSeries(true)} style={{
                 width: "100%", background: "none",
                 border: "1px dashed #2a2a44", color: "#44445a",
                 borderRadius: 4, padding: "10px", fontSize: 13,
                 fontFamily: "'JetBrains Mono', monospace", letterSpacing: 0.5,
-              }}>+ add genre</button>
+              }}>+ add series</button>
             ) : (
-              <div className="rt-fade" style={{
-                padding: "10px 14px", background: "#0d0d1e",
-                border: "1px solid #1a1a2e", borderRadius: 4,
-                display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap",
-              }}>
-                <input
-                  value={newGenreName}
-                  onChange={(e) => setNewGenreName(e.target.value)}
-                  placeholder="Genre name"
-                  style={{ ...inputStyle, flex: 1, minWidth: 160 }}
-                  onKeyDown={(e) => e.key === "Enter" && handleAddGenre()}
-                  autoFocus
-                />
-                <button onClick={handleAddGenre} style={btnStyle("#00f0ff", "#1a1208")}>Add Genre</button>
-                <button onClick={() => { setAddingGenre(false); setNewGenreName(""); }} style={btnStyle("#444", "#111")}>Cancel</button>
-              </div>
+              <AddSeriesForm onAdd={handleAddSeriesSubmit} onCancel={() => setAddingSeries(false)} />
             )}
           </div>
         )}
