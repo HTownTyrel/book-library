@@ -127,8 +127,11 @@ function LibraryView({ uid }) {
           books: s.books.map((b) => {
             if (b.id !== bookId) return b;
             const read = !b.read;
-            // Finishing a book means you're no longer "currently reading" it.
-            return { ...b, read, reading: read ? false : b.reading };
+            // Finishing a book means you're no longer "currently reading"
+            // it. `!!b.reading` normalizes a never-set `reading` field to
+            // a real `false` instead of `undefined` - Firestore rejects
+            // explicit undefined field values.
+            return { ...b, read, reading: read ? false : !!b.reading };
           }),
         }
       ),
@@ -320,14 +323,8 @@ function LibraryView({ uid }) {
       if (!series) return prev;
       const nextNum = series.books.length > 0 ? Math.max(...series.books.map((b) => b.bookNum)) + 1 : 1;
       const released = inferReleased(candidate.publishedDate);
-      const book = {
-        id: `${seriesId}-${uniqueId()}`,
-        bookNum: nextNum,
-        title: candidate.title,
-        read: false,
-        released,
-        releaseDate: released ? undefined : candidate.publishedDate,
-      };
+      const book = { id: `${seriesId}-${uniqueId()}`, bookNum: nextNum, title: candidate.title, read: false, released };
+      if (!released) book.releaseDate = candidate.publishedDate;
       const existing = prev.releaseChecks[authorName];
       return {
         ...prev,
@@ -348,14 +345,8 @@ function LibraryView({ uid }) {
     updateData((prev) => {
       const released = inferReleased(candidate.publishedDate);
       const seriesId = `s-${uniqueId()}`;
-      const book = {
-        id: `${seriesId}-${uniqueId()}`,
-        bookNum: 1,
-        title: candidate.title,
-        read: false,
-        released,
-        releaseDate: released ? undefined : candidate.publishedDate,
-      };
+      const book = { id: `${seriesId}-${uniqueId()}`, bookNum: 1, title: candidate.title, read: false, released };
+      if (!released) book.releaseDate = candidate.publishedDate;
       const newSeries = { id: seriesId, name: seriesName, author: authorName, books: [book] };
       const existing = prev.releaseChecks[authorName];
       return {

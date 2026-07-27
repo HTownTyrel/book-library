@@ -13,13 +13,17 @@ export function EditBookForm({ book, onSave, onCancel }) {
 
   const submit = () => {
     if (!title.trim()) return;
-    onSave(book.id, {
+    const updates = {
       title: title.trim(),
       bookNum: parseFloat(bookNum) || 0,
       read: unreleased ? false : read,
       released: !unreleased,
-      releaseDate: unreleased ? releaseDate : undefined,
-    });
+    };
+    // Only set releaseDate when it's actually meaningful - leaving it
+    // out entirely (rather than setting it to undefined) keeps Firestore
+    // happy, since it rejects explicit undefined field values.
+    if (unreleased) updates.releaseDate = releaseDate;
+    onSave(book.id, updates);
   };
 
   return (

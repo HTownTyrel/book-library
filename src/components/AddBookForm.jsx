@@ -10,14 +10,18 @@ export function AddBookForm({ seriesId, onAdd, onCancel }) {
 
   const submit = () => {
     if (!title.trim()) return;
-    onAdd(seriesId, {
+    const book = {
       id: `${seriesId}-${uniqueId()}`,
       bookNum: parseFloat(bookNum) || 0,
       title: title.trim(),
       read: false,
       released: !unreleased,
-      releaseDate: unreleased ? releaseDate : undefined,
-    });
+    };
+    // Only set releaseDate when it's actually meaningful - leaving it
+    // out entirely (rather than setting it to undefined) keeps Firestore
+    // happy, since it rejects explicit undefined field values.
+    if (unreleased) book.releaseDate = releaseDate;
+    onAdd(seriesId, book);
     setTitle(""); setBookNum(""); setReleaseDate(""); setUnreleased(false);
   };
 

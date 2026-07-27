@@ -23,6 +23,16 @@ export const auth = getAuth(app);
 // finishes - and still works read-only if you open it with no signal at
 // all. `persistentMultipleTabManager` avoids the errors you'd otherwise
 // get if this app is ever open in more than one browser tab at once.
+//
+// `ignoreUndefinedProperties` matters more than it looks: Firestore
+// normally throws (and crashes the app, since nothing here catches it)
+// if you try to save an object with an explicit `undefined` field
+// anywhere in it - e.g. `{ ...book, releaseDate: undefined }`. That
+// pattern shows up in a few places in this app (a book without a release
+// date, a book that's never been flagged "reading"), so without this
+// setting, ordinary actions like unchecking a finished book can crash
+// the whole page.
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  ignoreUndefinedProperties: true,
 });
